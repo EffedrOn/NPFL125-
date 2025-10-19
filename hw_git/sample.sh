@@ -1,1 +1,1 @@
-head -n 5 tenLinesText 
+head -n 2 tenLinesText 
