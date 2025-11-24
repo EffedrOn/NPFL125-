@@ -14,31 +14,34 @@ if __name__=="__main__":
 """
 
 """
-Simple POS tagger implementation using only standard library
-Uses word->tag mapping, context (previous tag), and suffix patterns for unknown words
+HMM-based POS tagger with Viterbi decoding
+Uses transition probabilities (tag->tag) and emission probabilities (tag->word)
 """
 
 import sys
 import pickle
 from collections import defaultdict, Counter
-import re
+import math
 
 class Tagger:
     def __init__(self):
-        self.model = {}  # Dictionary: word -> most common tag
+        self.model = {}  # Dictionary: word -> most common tag 
         self.default_tag = 'N'  # Default tag for unknown words
 
-        # Context models
-        self.tag_bigrams = defaultdict(Counter)  # previous_tag -> current_tag
-        self.word_tag_bigrams = defaultdict(lambda: defaultdict(Counter))  # previous_word -> current_word -> tag
-        # Suffix patterns for unknown words
+        # HMM components
+        self.transition_counts = defaultdict(Counter)  # previous_tag -> current_tag counts
+        self.emission_counts = defaultdict(lambda: defaultdict(int))  # tag -> word counts
+        self.tag_counts = Counter()  # Overall tag frequencies
+        self.start_tag_counts = Counter()  # Tags at sentence start
+        
+        # For unknown word handling
         self.suffix_patterns = defaultdict(Counter)  # suffix -> tag
+        self.all_tags = set()  # Set of all possible tags
+        
+        
 
-        # Context tracking for sequential prediction
-        self.previous_tag = None
-        self.previous_word = None
 
-    def _get_suffixes(self, word, max_len=4):
+    def _get_suffixes(self, word, max_len=6):
         """Extract suffixes of different lengths"""
         if len(word) < 2:
             return []
@@ -53,17 +56,16 @@ class Tagger:
         format of the file is: 
            word[tab]pos 
            or an empty line for a sentence boundary
-        the tagging model can be simply dictionary 
+        Trains HMM transition and emission probabilities
         """
 
-        # Count all word->tag pairs
+        # Count all word->tag pairs (for backward compatibility)
         word_tag_counts = defaultdict(Counter)
         all_tags = Counter()
 
         previous_tag = None
-        previous_word = None
+        sentence_start = True
 
-        # Try UTF-8 first, then fall back to iso-8859-2
         encodings = ['utf-8', 'iso-8859-2', 'latin-1']
         
         for encoding in encodings:
@@ -74,7 +76,7 @@ class Tagger:
                         if line == '':
                             # Sentence boundary - reset context
                             previous_tag = None
-                            previous_word = None
+                            sentence_start = True
                             continue
                         
                         parts = line.split('\t')
@@ -82,16 +84,22 @@ class Tagger:
                             word = parts[0]
                             tag = parts[1].strip()
                             if tag:
+                                # Count word->tag pairs
                                 word_tag_counts[word][tag] += 1
                                 all_tags[tag] += 1
+                                self.all_tags.add(tag)
                                 
-                                # Learn tag bigrams
+                                # Count emissions: tag -> word
+                                self.emission_counts[tag][word] += 1
+                                self.tag_counts[tag] += 1
+                                
+                                # Count transitions: previous_tag -> current_tag
                                 if previous_tag is not None:
-                                    self.tag_bigrams[previous_tag][tag] += 1
+                                    self.transition_counts[previous_tag][tag] += 1
                                 
-                                # Learn word-tag bigrams
-                                if previous_word is not None:
-                                    self.word_tag_bigrams[previous_word][word][tag] += 1
+                                # Track sentence start tags
+                                if sentence_start:
+                                    self.start_tag_counts[tag] += 1
                                 
                                 # Learn suffix patterns (for unknown words)
                                 suffixes = self._get_suffixes(word)
@@ -99,20 +107,152 @@ class Tagger:
                                     self.suffix_patterns[suffix][tag] += 1
                                 
                                 previous_tag = tag
-                                previous_word = word
-                    break  # Success, exit the encoding loop
+                                sentence_start = False
+                    break  # Success
             except (UnicodeDecodeError, Exception) as e:
-                continue  # Try next encoding
+                continue  
         
-        # Store most common tag for each word
-        # this is the first primitive implementation for now
+        # Store most common tag for each word (for backward compatibility)
         for word, tag_counts in word_tag_counts.items():
             self.model[word] = tag_counts.most_common(1)[0][0]
         
         # Set default tag to most common tag overall
         if all_tags:
             self.default_tag = all_tags.most_common(1)[0][0]
- 
+
+    def _log_probability(self, count, total, smoothing=1.0):
+        """Calculate log probability with add-one smoothing"""
+        if total == 0:
+            return -float('inf')
+        return math.log((count + smoothing) / (total + smoothing * len(self.all_tags)))
+
+    def _get_emission_log_prob(self, tag, word):
+        """Get log probability of word given tag, with smoothing for unknown words"""
+        # Known word
+        if word in self.emission_counts[tag]:
+            count = self.emission_counts[tag][word]
+            total = self.tag_counts[tag]
+            return self._log_probability(count, total)
+        
+        # Unknown word - use suffix patterns and heuristics
+        log_prob = -10.0  # Base penalty for unknown words
+        
+        # Use suffix patterns
+        suffixes = self._get_suffixes(word)
+        suffix_score = 0.0
+        for suffix in suffixes:
+            if suffix in self.suffix_patterns:
+                if tag in self.suffix_patterns[suffix]:
+                    suffix_score += math.log(1 + self.suffix_patterns[suffix][tag])
+        
+        if suffix_score > 0:
+            log_prob = -5.0 + suffix_score * 0.1
+        
+        # Word shape heuristics
+        if word and len(word) > 0:
+            if word[0].isupper() and len(word) > 1:
+                if tag == 'N':  # Proper nouns
+                    log_prob += 1.0
+            if word.isdigit() or (word.replace(',', '').replace('.', '').isdigit()):
+                if tag == 'C':  # Numerals
+                    log_prob += 3.0
+            if len(word) == 1 and word.isalpha():
+                if tag in ['R', 'J']:  # Prepositions/conjunctions
+                    log_prob += 1.0
+            if word in [',', '.', ':', ';', '!', '?', '-', '(', ')', '[', ']', '{', '}']: # maybe here woul be better to just check if it is not letter or numnber
+                if tag == 'Z':  # Punctuation
+                    log_prob += 3.0
+        
+        # Fallback: use tag frequency
+        if self.tag_counts[tag] > 0:
+            tag_freq = self.tag_counts[tag] / sum(self.tag_counts.values())
+            log_prob += math.log(tag_freq) * 0.5
+        
+        return log_prob
+
+    def _get_transition_log_prob(self, prev_tag, curr_tag):
+        """Get log probability of transition from prev_tag to curr_tag"""
+        if prev_tag in self.transition_counts:
+            count = self.transition_counts[prev_tag][curr_tag]
+            total = sum(self.transition_counts[prev_tag].values())
+            return self._log_probability(count, total)
+        # Unknown transition - use tag frequency
+        if self.tag_counts[curr_tag] > 0:
+            tag_freq = self.tag_counts[curr_tag] / sum(self.tag_counts.values())
+            return math.log(tag_freq) - 2.0  # Penalty for unknown transition
+        return -10.0
+
+    def _get_start_log_prob(self, tag):
+        """Get log probability of tag at sentence start"""
+        if self.start_tag_counts[tag] > 0:
+            total_starts = sum(self.start_tag_counts.values())
+            return self._log_probability(self.start_tag_counts[tag], total_starts)
+        # Fallback to tag frequency
+        if self.tag_counts[tag] > 0:
+            tag_freq = self.tag_counts[tag] / sum(self.tag_counts.values())
+            return math.log(tag_freq) - 1.0
+        return -10.0
+
+    def _viterbi(self, words):
+        """Viterbi algorithm to find most likely tag sequence"""
+        
+        n = len(words)
+        if n == 0:
+            return []
+        
+        # Get all possible tags
+        tags = list(self.all_tags) if self.all_tags else [self.default_tag]
+        if not tags:
+            return [self.default_tag] * n
+        
+        # Initialize DP table: viterbi[i][tag] = best log probability ending at position i with tag
+        viterbi = [{} for _ in range(n)]
+        backpointer = [{} for _ in range(n)]
+        
+        # Initialize first position
+        for tag in tags:
+            start_prob = self._get_start_log_prob(tag)
+            emission_prob = self._get_emission_log_prob(tag, words[0])
+            viterbi[0][tag] = start_prob + emission_prob
+            backpointer[0][tag] = None
+        
+        # Filling DP table
+        for i in range(1, n):
+            for curr_tag in tags:
+                best_prob = -float('inf')
+                best_prev_tag = None
+                
+                emission_prob = self._get_emission_log_prob(curr_tag, words[i])
+                
+                for prev_tag in tags:
+                    transition_prob = self._get_transition_log_prob(prev_tag, curr_tag)
+                    prob = viterbi[i-1][prev_tag] + transition_prob + emission_prob
+                    
+                    if prob > best_prob:
+                        best_prob = prob
+                        best_prev_tag = prev_tag
+                
+                viterbi[i][curr_tag] = best_prob
+                backpointer[i][curr_tag] = best_prev_tag
+        
+        # Backtrack to find best path
+        # Find best final tag
+        best_final_prob = -float('inf')
+        best_final_tag = None
+        for tag in tags:
+            if viterbi[n-1][tag] > best_final_prob:
+                best_final_prob = viterbi[n-1][tag]
+                best_final_tag = tag
+        
+        # Backtrack
+        path = []
+        curr_tag = best_final_tag
+        for i in range(n-1, -1, -1):
+            path.append(curr_tag)
+            curr_tag = backpointer[i][curr_tag]
+        
+        path.reverse()
+        return path
             
     def save(self, filename):
         """
@@ -123,9 +263,12 @@ class Tagger:
                 pickle.dump({
                     'model': self.model, 
                     'default_tag': self.default_tag,
-                    'tag_bigrams': dict(self.tag_bigrams),
-                    'word_tag_bigrams': {k: dict(v) for k, v in self.word_tag_bigrams.items()},
-                    'suffix_patterns': dict(self.suffix_patterns)
+                    'transition_counts': {k: dict(v) for k, v in self.transition_counts.items()},
+                    'emission_counts': {k: dict(v) for k, v in self.emission_counts.items()},
+                    'tag_counts': dict(self.tag_counts),
+                    'start_tag_counts': dict(self.start_tag_counts),
+                    'suffix_patterns': dict(self.suffix_patterns),
+                    'all_tags': list(self.all_tags)
                 }, f)
         except Exception as e:
             pass
@@ -135,79 +278,72 @@ class Tagger:
         loads the tagging model from a file
         """
         try:
-                with open(filename, 'rb') as f:
-                    data = pickle.load(f)
-                    self.model = data.get('model', {})
-                    self.default_tag = data.get('default_tag', 'N')
-                    # Load context models
-                    tag_bigrams_data = data.get('tag_bigrams', {})
-                    self.tag_bigrams = defaultdict(Counter)
-                    for prev_tag, next_tags in tag_bigrams_data.items():
-                        self.tag_bigrams[prev_tag] = Counter(next_tags)
-                    
-                    word_tag_bigrams_data = data.get('word_tag_bigrams', {})
-                    self.word_tag_bigrams = defaultdict(lambda: defaultdict(Counter))
-                    for prev_word, word_tags in word_tag_bigrams_data.items():
-                        for word, tags in word_tags.items():
-                            self.word_tag_bigrams[prev_word][word] = Counter(tags)
-                    
-                    suffix_patterns_data = data.get('suffix_patterns', {})
-                    self.suffix_patterns = defaultdict(Counter)
-                    for suffix, tags in suffix_patterns_data.items():
-                        self.suffix_patterns[suffix] = Counter(tags)
+            with open(filename, 'rb') as f:
+                data = pickle.load(f)
+                self.model = data.get('model', {})
+                self.default_tag = data.get('default_tag', 'N')
+                
+                # Load HMM components
+                transition_data = data.get('transition_counts', {})
+                self.transition_counts = defaultdict(Counter)
+                for prev_tag, next_tags in transition_data.items():
+                    self.transition_counts[prev_tag] = Counter(next_tags)
+                
+                emission_data = data.get('emission_counts', {})
+                self.emission_counts = defaultdict(lambda: defaultdict(int))
+                for tag, words in emission_data.items():
+                    self.emission_counts[tag] = defaultdict(int, words)
+                
+                self.tag_counts = Counter(data.get('tag_counts', {}))
+                self.start_tag_counts = Counter(data.get('start_tag_counts', {}))
+                
+                suffix_patterns_data = data.get('suffix_patterns', {})
+                self.suffix_patterns = defaultdict(Counter)
+                for suffix, tags in suffix_patterns_data.items():
+                    self.suffix_patterns[suffix] = Counter(tags)
+                
+                self.all_tags = set(data.get('all_tags', []))
         except Exception as e:
             self.model = {}
             self.default_tag = 'N'
-            self.tag_bigrams = defaultdict(Counter)
-            self.word_tag_bigrams = defaultdict(lambda: defaultdict(Counter))
+            self.transition_counts = defaultdict(Counter)
+            self.emission_counts = defaultdict(lambda: defaultdict(int))
+            self.tag_counts = Counter()
+            self.start_tag_counts = Counter()
             self.suffix_patterns = defaultdict(Counter)
+            self.all_tags = set()
 
-        # Reset context
-        self.previous_tag = None
-        self.previous_word = None
+        
                 
     def predict(self, word):
         """
         predicts and returns the POS tag for a given word
         must be a valid 1-letter POS tag for any word
+        This method is kept for backward compatibility but uses simple lookup
         """
-        # If word is known, trust the stored tag (no context override)
+        # If word is known, trust the stored tag
         if word in self.model:
             return self.model[word]
         
-        # For unknown words, use multiple features with scoring
+        # For unknown words, use suffix patterns and heuristics
         scores = Counter()
         
-        # Feature 1: Context - previous tag bigram (strong signal)
-        if self.previous_tag is not None and self.previous_tag in self.tag_bigrams:
-            for tag, count in self.tag_bigrams[self.previous_tag].items():
-                scores[tag] += count * 3  # Weight context
-        
-        # Feature 2: Context - previous word -> current word bigram (very strong signal)
-        if self.previous_word is not None and self.previous_word in self.word_tag_bigrams:
-            if word in self.word_tag_bigrams[self.previous_word]:
-                for tag, count in self.word_tag_bigrams[self.previous_word][word].items():
-                    scores[tag] += count * 5  # Higher weight for word context
-        
-        # Feature 3: Suffix patterns (morphological clues)
+        # Use suffix patterns
         suffixes = self._get_suffixes(word)
         for suffix in suffixes:
             if suffix in self.suffix_patterns:
                 for tag, count in self.suffix_patterns[suffix].items():
                     scores[tag] += count
         
-        # Feature 4: Word shape heuristics
+        # Word shape heuristics
         if word and len(word) > 0:
             if word[0].isupper() and len(word) > 1:
-                # Capitalized words are often nouns (proper nouns)
                 scores['N'] += 2
             if word.isdigit() or (word.replace(',', '').replace('.', '').isdigit()):
-                scores['C'] += 10  # Numbers are almost always numerals
+                scores['C'] += 10
             if len(word) == 1 and word.isalpha():
-                # Single letter words are often prepositions or conjunctions
                 scores['R'] += 2
                 scores['J'] += 2
-            # Punctuation detection
             if word in [',', '.', ':', ';', '!', '?', '-', '(', ')', '[', ']', '{', '}']:
                 scores['Z'] += 10
         
@@ -219,32 +355,48 @@ class Tagger:
         
     def predict_all(self, filename):
         """
-        predicts POS tags for all words in a file
+        predicts POS tags for all words in a file using Viterbi algorithm
         the format of the file is one word per line, or an empty line for sentence boundary, UTF-8 encoding
         the output should be returned as a list of the POS labels, or an empty string for sentence boundary e.g. ['N', 'V', 'Z', '', 'R']
         """
         results = []
-        # Reset context at start
-        self.previous_tag = None
-        self.previous_word = None
+        current_sentence = []
         
         try:
             with open(filename, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
                     if line == '':
+                        # Process accumulated sentence with Viterbi
+                        if current_sentence:
+                            tags = self._viterbi(current_sentence)
+                            results.extend(tags)
+                            current_sentence = []
                         results.append('')
-                        # Reset context on sentence boundary
-                        self.previous_tag = None
-                        self.previous_word = None
                     else:
-                        predicted = self.predict(line)
-                        results.append(predicted)
-                        # Update context for next prediction
-                        self.previous_tag = predicted
-                        self.previous_word = line
+                        current_sentence.append(line)
+                
+                # Process last sentence if file doesn't end with empty line
+                if current_sentence:
+                    tags = self._viterbi(current_sentence)
+                    results.extend(tags)
         except Exception as e:
-            pass
+            
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line == '':
+                            results.append('')
+                            
+                        else:
+                            predicted = self.predict(line)
+                            results.append(predicted)
+                            #self.previous_tag = predicted
+                            #self.previous_word = line
+            except:
+                pass
+        
         return results
         
 
@@ -260,9 +412,8 @@ class Tagger:
         """
         correct = 0
         total = 0
-        # Reset context at start
-        self.previous_tag = None
-        self.previous_word = None
+        current_sentence_words = []
+        current_sentence_true_tags = []
         
         # Try multiple encodings like in train()
         encodings = ['utf-8', 'iso-8859-2', 'latin-1']
@@ -273,21 +424,31 @@ class Tagger:
                     for line in f:
                         line = line.strip()
                         if line == '':
-                            # Reset context on sentence boundary
-                            self.previous_tag = None
-                            self.previous_word = None
-                            continue  # Skip sentence boundaries
+                            # Process sentence with Viterbi
+                            if current_sentence_words:
+                                predicted_tags = self._viterbi(current_sentence_words)
+                                for pred_tag, true_tag in zip(predicted_tags, current_sentence_true_tags):
+                                    total += 1
+                                    if pred_tag == true_tag:
+                                        correct += 1
+                                current_sentence_words = []
+                                current_sentence_true_tags = []
+                            continue
+                        
                         parts = line.split('\t')
                         if len(parts) == 2:
                             word, true_tag = parts
-                            true_tag = true_tag.strip()  # Strip whitespace from tag
-                            predicted = self.predict(word)
+                            true_tag = true_tag.strip()
+                            current_sentence_words.append(word)
+                            current_sentence_true_tags.append(true_tag)
+                    
+                    # Process last sentence if file doesn't end with empty line
+                    if current_sentence_words:
+                        predicted_tags = self._viterbi(current_sentence_words)
+                        for pred_tag, true_tag in zip(predicted_tags, current_sentence_true_tags):
                             total += 1
-                            if predicted == true_tag:
+                            if pred_tag == true_tag:
                                 correct += 1
-                            # Update context for next prediction
-                            self.previous_tag = predicted
-                            self.previous_word = word
                     break  # Success, exit encoding loop
             except (UnicodeDecodeError, Exception) as e:
                 continue  # Try next encoding
