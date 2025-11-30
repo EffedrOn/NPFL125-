@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+myenv/
+venv/
+env/
+ENV/
+.venv/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Testing data and generated files
+hw_tagger/tagger-devel.tsv
+hw_tagger/tagger-eval.tsv
+hw_tagger/tagger.model
+hw_tagger/recodexLibrariesTest.py
+hw_string/test_file
+hw_string/udhr/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
