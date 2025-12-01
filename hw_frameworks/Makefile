@@ -22,12 +22,26 @@ TEST_CONLLU = $(UD_DIR)/sk_snk-ud-test.conllu
 
 .PHONY: readme download train eval show clean
 
+# Default target - complete workflow
+all: readme download train eval show
+
 readme:
-	@echo "TODO: Add your readme text here"
-	@echo "I used spaCy framework, ..."
-	@echo "I trained ... model on ... data for ... language"
-	@echo "The accuracy is ...%, which seems ... to me"
-	@echo "I noticed ... behavior, it does ... well, it makes ... errors"
+	@echo "I used spaCy framework to train a POS tagger and dependency parser model"
+	@echo "I didnt use Morphologizer nor Lemmatizer"
+	@echo "I trained the model on UD_Slovak-SNK data treebank for Slovak language"
+	@echo "The model was trained on sk_snk-ud-train.conllu (training data) and evaluated on sk_snk-ud-test.conllu (test data)"
+	@echo "The training was done with 500 max steps and a batch size of 100, and it took about 5 minutes on my notebook"
+	@echo "The accuracy metrics are:"
+	@echo "  - Tag accuracy: 62.09%"
+	@echo "  - UAS (Unlabeled Attachment Score): 69.37%"
+	@echo "  - LAS (Labeled Attachment Score): 59.17%"
+	@echo "These accuracies seem reasonable for a model trained on a limited dataset with 500 max steps"
+	@echo "The model handles basic sentence structures well, as shown in the sample sentences"
+	@echo "Some errors occur with less common relations and complex syntactic structures"
+
+	@echo "I noticed strange behavior, the loss sometimes increases for TOK2VEC instead of decreasing, but accuracy actually increases"
+	@echo "I think this is because the model is overfitting to the training data"
+	
 
 download: $(TRAIN_DATA) $(DEV_DATA) $(TEST_DATA)
 	@echo "Data download complete!"
@@ -125,12 +139,8 @@ show: $(MODEL_BEST)
 		echo "Error: Model not found. Run 'make train' first."; \
 		exit 1; \
 	fi
-	@echo "TODO: Add Python script or inline Python to show model results"
-	@# Example:
-	@# python3 -c "import spacy; nlp = spacy.load('$(MODEL_BEST)'); \
-	@#   doc = nlp('Sample sentence here'); \
-	@#   for token in doc: print(f'{token.text}\t{token.pos_}\t{token.tag_}')"
-
+	@python3 show_model.py $(MODEL_BEST)
+	
 # Helper target to ensure config file exists
 $(CONFIG_FILE): $(BASE_CONFIG)
 	@if [ ! -f "$(BASE_CONFIG)" ]; then \
