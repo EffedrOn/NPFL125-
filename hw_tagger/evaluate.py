@@ -14,5 +14,5 @@ else:
     print("WARNING: Model is empty!")
 
 # Try evaluation
-accuracy = tagger.eval('tagger-devel.tsv')
+accuracy = tagger.eval('tagger-eval.tsv')
 print(f"Accuracy: {accuracy}%")

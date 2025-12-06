@@ -41,3 +41,11 @@ hw_string/udhr/
 *.tmp
 *.temp
 
+# corpus
+UD_Slovak-SNK/
+
+data/
+# Model files
+hw_frameworks/models/
+*.model
+*.cfg
