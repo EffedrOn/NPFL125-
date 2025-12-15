@@ -1,0 +1,10 @@
+1. Analyze some text (poem) 
+2. Find synonyms and rhymes with a Datamuse API
+
+OR
+
+1. Analyze some text
+2. Refactor it with the Datamuse so it uses only synonyms.
+
+
+Probably in both approaches i will need to somehow combine the refactored result into the text again.
